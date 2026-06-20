@@ -60,4 +60,27 @@ public class RouteController {
         String kml = routeService.exportKML(waypoints, name);
         return Map.of("kml", kml);
     }
+
+    @PostMapping("/route/validate")
+    public Map<String, Object> validateRoute(@RequestBody Map<String, Object> request) {
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> wpData = (List<Map<String, Object>>) request.get("waypoints");
+        double batteryUsage = ((Number) request.getOrDefault("batteryUsage", 0)).doubleValue();
+        double maxAltitude = ((Number) request.getOrDefault("maxAltitude", 500)).doubleValue();
+        double safeDistance = ((Number) request.getOrDefault("safeDistance", 30)).doubleValue();
+
+        List<Waypoint> waypoints = new java.util.ArrayList<>();
+        for (Map<String, Object> w : wpData) {
+            waypoints.add(new Waypoint(
+                (String) w.getOrDefault("id", ""),
+                ((Number) w.get("lat")).doubleValue(),
+                ((Number) w.get("lng")).doubleValue(),
+                ((Number) w.getOrDefault("altitude", 100)).doubleValue(),
+                ((Number) w.getOrDefault("speed", 10)).doubleValue(),
+                (String) w.getOrDefault("action", "none")
+            ));
+        }
+
+        return routeService.validateRoute(waypoints, batteryUsage, maxAltitude, safeDistance);
+    }
 }

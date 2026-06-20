@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { useDroneStore } from '../store/drone';
+import ExportValidation from './ExportValidation.vue';
 
 const store = useDroneStore();
 
@@ -16,15 +17,24 @@ function batteryColor(pct: number): string {
 }
 
 function handleExport() {
+  store.openExportDialog();
+}
+
+function confirmExport() {
   const kml = store.exportPlan();
   if (!kml) return;
   const blob = new Blob([kml], { type: 'application/vnd.google-earth.kml+xml' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'flight-plan.kml';
+  a.download = `flight-plan-${Date.now()}.kml`;
   a.click();
   URL.revokeObjectURL(url);
+  store.closeExportDialog();
+}
+
+function cancelExport() {
+  store.closeExportDialog();
 }
 </script>
 
@@ -96,4 +106,6 @@ function handleExport() {
       导出 KML
     </button>
   </div>
+
+  <ExportValidation @confirm="confirmExport" @cancel="cancelExport" />
 </template>

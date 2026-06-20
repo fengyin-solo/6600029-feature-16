@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-import type { Waypoint, NoFlyZone, TerrainPoint, FlightPlan, DroneConfig } from '../types';
+import type { Waypoint, NoFlyZone, TerrainPoint, FlightPlan, DroneConfig, ValidationSummary } from '../types';
 import {
   aStarPathfind,
   rrtPathfind,
@@ -10,6 +10,7 @@ import {
   exportKML,
   mockNoFlyZones,
   mockTerrainData,
+  validateFlightPlan,
 } from '../utils/pathfinding';
 
 export const useDroneStore = defineStore('drone', () => {
@@ -21,6 +22,8 @@ export const useDroneStore = defineStore('drone', () => {
   const isSimulating = ref(false);
   const simProgress = ref(0);
   const mapCenter = ref<[number, number]>([39.9, 116.4]);
+  const exportValidationResult = ref<ValidationSummary | null>(null);
+  const showExportDialog = ref(false);
 
   const droneConfig = ref<DroneConfig>({
     maxAltitude: 500,
@@ -108,6 +111,27 @@ export const useDroneStore = defineStore('drone', () => {
     return exportKML(currentPlan.value);
   }
 
+  function runExportValidation(): ValidationSummary {
+    const summary = validateFlightPlan(
+      waypoints.value,
+      noFlyZones.value,
+      terrainData.value,
+      droneConfig.value,
+      batteryPercent.value
+    );
+    exportValidationResult.value = summary;
+    return summary;
+  }
+
+  function openExportDialog() {
+    runExportValidation();
+    showExportDialog.value = true;
+  }
+
+  function closeExportDialog() {
+    showExportDialog.value = false;
+  }
+
   // ─── Computed ─────────────────────────────────────────────────────────────
   const totalDistance = computed(() => {
     if (!currentPlan.value) return 0;
@@ -156,6 +180,8 @@ export const useDroneStore = defineStore('drone', () => {
     isSimulating,
     simProgress,
     mapCenter,
+    exportValidationResult,
+    showExportDialog,
     totalDistance,
     estimatedTime,
     batteryPercent,
@@ -169,5 +195,8 @@ export const useDroneStore = defineStore('drone', () => {
     loadMockData,
     exportPlan,
     updatePlan,
+    runExportValidation,
+    openExportDialog,
+    closeExportDialog,
   };
 });

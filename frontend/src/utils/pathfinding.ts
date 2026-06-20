@@ -1,4 +1,4 @@
-import type { Waypoint, NoFlyZone, TerrainPoint, FlightPlan, DroneConfig } from '../types';
+import type { Waypoint, NoFlyZone, TerrainPoint, FlightPlan, DroneConfig, RiskItem, RiskLevel, RiskCategory, ValidationSummary } from '../types';
 
 // ─── Haversine distance ─────────────────────────────────────────────────────
 export function haversine(lat1: number, lng1: number, lat2: number, lng2: number): number {
@@ -392,3 +392,182 @@ export const mockTerrainData: TerrainPoint[] = (() => {
   }
   return points;
 })();
+
+// ─── Validation: Battery Risk ───────────────────────────────────────────────
+export function checkBatteryRisk(batteryUsage: number): RiskItem | null {
+  if (batteryUsage >= 95) {
+    return {
+      category: 'battery',
+      level: 'danger',
+      title: '电量严重不足',
+      description: '预计电量消耗已超过 95%，无法完成返程',
+      detail: `预计消耗 ${batteryUsage.toFixed(1)}%，建议降低飞行速度或缩短航线距离`,
+    };
+  }
+  if (batteryUsage >= 75) {
+    return {
+      category: 'battery',
+      level: 'warning',
+      title: '电量预警',
+      description: '预计电量消耗超过 75%，需留意剩余电量',
+      detail: `预计消耗 ${batteryUsage.toFixed(1)}%，建议预留足够返程电量`,
+    };
+  }
+  if (batteryUsage >= 50) {
+    return {
+      category: 'battery',
+      level: 'warning',
+      title: '电量消耗较高',
+      description: '预计电量消耗超过 50%',
+      detail: `预计消耗 ${batteryUsage.toFixed(1)}%`,
+    };
+  }
+  return null;
+}
+
+// ─── Validation: No-Fly Zone Risk ───────────────────────────────────────────
+export function checkNoFlyZoneRisk(waypoints: Waypoint[], noFlyZones: NoFlyZone[]): RiskItem | null {
+  const violations: { wp: Waypoint; zone: NoFlyZone; dist: number }[] = [];
+
+  for (const wp of waypoints) {
+    for (const zone of noFlyZones) {
+      const d = haversine(wp.lat, wp.lng, zone.center[0], zone.center[1]);
+      if (d < zone.radius) {
+        violations.push({ wp, zone, dist: d });
+      }
+    }
+  }
+
+  if (violations.length === 0) return null;
+
+  const affectedZones = new Set(violations.map((v) => v.zone.name));
+  const affectedWpIds = violations.map((v) => v.wp.id);
+
+  const hasMilitary = violations.some((v) => v.zone.type === 'military');
+  const hasAirport = violations.some((v) => v.zone.type === 'airport');
+  const level: RiskLevel = hasMilitary || hasAirport ? 'danger' : 'warning';
+
+  return {
+    category: 'noFlyZone',
+    level,
+    title: level === 'danger' ? '严重：航线侵入禁飞区' : '警告：航线接近限制区',
+    description: `航线侵入 ${affectedZones.size} 个禁飞/限制区，涉及 ${violations.length} 个航点`,
+    detail: `涉及区域：${Array.from(affectedZones).join('、')}`,
+    affectedWaypoints: affectedWpIds,
+  };
+}
+
+// ─── Validation: Altitude Risk ──────────────────────────────────────────────
+export function checkAltitudeRisk(waypoints: Waypoint[], maxAltitude: number): RiskItem | null {
+  const overLimit: Waypoint[] = waypoints.filter((w) => w.altitude > maxAltitude);
+  const nearLimit: Waypoint[] = waypoints.filter(
+    (w) => w.altitude > maxAltitude * 0.85 && w.altitude <= maxAltitude
+  );
+
+  if (overLimit.length === 0 && nearLimit.length === 0) return null;
+
+  if (overLimit.length > 0) {
+    const maxObserved = Math.max(...waypoints.map((w) => w.altitude));
+    return {
+      category: 'altitude',
+      level: 'danger',
+      title: '高度超限',
+      description: `${overLimit.length} 个航点超过最大飞行高度限制`,
+      detail: `最大高度限制 ${maxAltitude}m，观测最大高度 ${maxObserved.toFixed(1)}m`,
+      affectedWaypoints: overLimit.map((w) => w.id),
+    };
+  }
+
+  return {
+    category: 'altitude',
+    level: 'warning',
+    title: '接近高度上限',
+    description: `${nearLimit.length} 个航点已接近最大飞行高度`,
+    detail: `最大高度限制 ${maxAltitude}m，部分航点已达 85% 以上`,
+    affectedWaypoints: nearLimit.map((w) => w.id),
+  };
+}
+
+// ─── Validation: Terrain Collision Risk ─────────────────────────────────────
+export function checkTerrainRisk(
+  waypoints: Waypoint[],
+  terrain: TerrainPoint[],
+  safeDistance: number
+): RiskItem | null {
+  const terrainCheck = checkTerrainCollision(waypoints, terrain, safeDistance);
+
+  if (terrainCheck.safe) return null;
+
+  const critical: string[] = [];
+  const warning: string[] = [];
+
+  for (const { wp, terrainElev } of terrainCheck.collisions) {
+    const clearance = wp.altitude - terrainElev;
+    if (clearance <= 0) {
+      critical.push(wp.id);
+    } else {
+      warning.push(wp.id);
+    }
+  }
+
+  if (critical.length > 0) {
+    return {
+      category: 'terrain',
+      level: 'danger',
+      title: '严重：存在撞山风险',
+      description: `${critical.length} 个航点高度低于或等于地形海拔`,
+      detail: `安全距离要求 ${safeDistance}m，建议提升飞行高度或重新规划航线`,
+      affectedWaypoints: [...critical, ...warning],
+    };
+  }
+
+  return {
+    category: 'terrain',
+    level: 'warning',
+    title: '地形安全距离不足',
+    description: `${warning.length} 个航点与地形安全距离不足`,
+    detail: `安全距离要求 ${safeDistance}m，建议适当提升高度`,
+    affectedWaypoints: warning,
+  };
+}
+
+// ─── Aggregated Validation Summary ──────────────────────────────────────────
+export function validateFlightPlan(
+  waypoints: Waypoint[],
+  noFlyZones: NoFlyZone[],
+  terrain: TerrainPoint[],
+  config: DroneConfig,
+  batteryUsage: number
+): ValidationSummary {
+  const risks: RiskItem[] = [];
+
+  const batteryRisk = checkBatteryRisk(batteryUsage);
+  if (batteryRisk) risks.push(batteryRisk);
+
+  const nfzRisk = checkNoFlyZoneRisk(waypoints, noFlyZones);
+  if (nfzRisk) risks.push(nfzRisk);
+
+  const altRisk = checkAltitudeRisk(waypoints, config.maxAltitude);
+  if (altRisk) risks.push(altRisk);
+
+  const terrainRisk = checkTerrainRisk(waypoints, terrain, config.safeDistance);
+  if (terrainRisk) risks.push(terrainRisk);
+
+  const dangerCount = risks.filter((r) => r.level === 'danger').length;
+  const warningCount = risks.filter((r) => r.level === 'warning').length;
+
+  let overallLevel: RiskLevel = 'safe';
+  if (dangerCount > 0) overallLevel = 'danger';
+  else if (warningCount > 0) overallLevel = 'warning';
+
+  const canExport = waypoints.length >= 2;
+
+  return {
+    overallLevel,
+    totalRiskCount: risks.length,
+    dangerCount,
+    warningCount,
+    risks,
+    canExport,
+  };
+}

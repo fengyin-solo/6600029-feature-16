@@ -37,3 +37,25 @@ export interface DroneConfig {
   consumptionRate: number;  // mAh/min
   safeDistance: number;     // meters from obstacles
 }
+
+export type RiskLevel = 'safe' | 'warning' | 'danger';
+
+export type RiskCategory = 'battery' | 'noFlyZone' | 'altitude' | 'terrain';
+
+export interface RiskItem {
+  category: RiskCategory;
+  level: RiskLevel;
+  title: string;
+  description: string;
+  detail?: string;
+  affectedWaypoints?: string[];
+}
+
+export interface ValidationSummary {
+  overallLevel: RiskLevel;
+  totalRiskCount: number;
+  dangerCount: number;
+  warningCount: number;
+  risks: RiskItem[];
+  canExport: boolean;
+}

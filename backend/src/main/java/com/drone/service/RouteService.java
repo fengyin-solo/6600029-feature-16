@@ -182,4 +182,184 @@ public class RouteService {
         sb.append("  </Document>\n</kml>");
         return sb.toString();
     }
+
+    // ─── Route Validation ────────────────────────────────────────────────────
+    public Map<String, Object> validateRoute(List<Waypoint> waypoints,
+                                             double batteryUsagePercent,
+                                             double maxAltitude,
+                                             double safeDistance) {
+        List<Map<String, Object>> risks = new ArrayList<>();
+        int dangerCount = 0;
+        int warningCount = 0;
+
+        // 1. Battery risk
+        if (batteryUsagePercent >= 95) {
+            risks.add(Map.of(
+                "category", "battery",
+                "level", "danger",
+                "title", "电量严重不足",
+                "description", "预计电量消耗已超过 95%，无法完成返程",
+                "detail", String.format("预计消耗 %.1f%%，建议降低飞行速度或缩短航线距离", batteryUsagePercent)
+            ));
+            dangerCount++;
+        } else if (batteryUsagePercent >= 75) {
+            risks.add(Map.of(
+                "category", "battery",
+                "level", "warning",
+                "title", "电量预警",
+                "description", "预计电量消耗超过 75%，需留意剩余电量",
+                "detail", String.format("预计消耗 %.1f%%，建议预留足够返程电量", batteryUsagePercent)
+            ));
+            warningCount++;
+        } else if (batteryUsagePercent >= 50) {
+            risks.add(Map.of(
+                "category", "battery",
+                "level", "warning",
+                "title", "电量消耗较高",
+                "description", "预计电量消耗超过 50%",
+                "detail", String.format("预计消耗 %.1f%%", batteryUsagePercent)
+            ));
+            warningCount++;
+        }
+
+        // 2. No-fly zone risk
+        List<double[]> noFlyZones = getMockNoFlyZoneCoords();
+        List<String> nfzNames = List.of("首都国际机场", "南苑军事区", "中南海限制区");
+        List<String> nfzTypes = List.of("airport", "military", "restricted");
+        List<String> affectedZones = new ArrayList<>();
+        List<String> affectedWpIds = new ArrayList<>();
+        boolean hasMilitaryOrAirport = false;
+
+        for (int zi = 0; zi < noFlyZones.size(); zi++) {
+            double[] zone = noFlyZones.get(zi);
+            for (Waypoint wp : waypoints) {
+                double dist = haversine(wp.getLat(), wp.getLng(), zone[0], zone[1]);
+                if (dist < zone[2]) {
+                    if (!affectedZones.contains(nfzNames.get(zi))) {
+                        affectedZones.add(nfzNames.get(zi));
+                        if ("military".equals(nfzTypes.get(zi)) || "airport".equals(nfzTypes.get(zi))) {
+                            hasMilitaryOrAirport = true;
+                        }
+                    }
+                    if (!affectedWpIds.contains(wp.getId())) {
+                        affectedWpIds.add(wp.getId());
+                    }
+                }
+            }
+        }
+
+        if (!affectedZones.isEmpty()) {
+            String nfzLevel = hasMilitaryOrAirport ? "danger" : "warning";
+            if ("danger".equals(nfzLevel)) dangerCount++;
+            else warningCount++;
+            risks.add(Map.of(
+                "category", "noFlyZone",
+                "level", nfzLevel,
+                "title", "danger".equals(nfzLevel) ? "严重：航线侵入禁飞区" : "警告：航线接近限制区",
+                "description", String.format("航线侵入 %d 个禁飞/限制区，涉及 %d 个航点",
+                    affectedZones.size(), affectedWpIds.size()),
+                "detail", "涉及区域：" + String.join("、", affectedZones),
+                "affectedWaypoints", affectedWpIds
+            ));
+        }
+
+        // 3. Altitude risk
+        List<String> overLimitIds = new ArrayList<>();
+        List<String> nearLimitIds = new ArrayList<>();
+        double maxObserved = 0;
+        for (Waypoint w : waypoints) {
+            maxObserved = Math.max(maxObserved, w.getAltitude());
+            if (w.getAltitude() > maxAltitude) {
+                overLimitIds.add(w.getId());
+            } else if (w.getAltitude() > maxAltitude * 0.85) {
+                nearLimitIds.add(w.getId());
+            }
+        }
+        if (!overLimitIds.isEmpty()) {
+            risks.add(Map.of(
+                "category", "altitude",
+                "level", "danger",
+                "title", "高度超限",
+                "description", String.format("%d 个航点超过最大飞行高度限制", overLimitIds.size()),
+                "detail", String.format("最大高度限制 %.0fm，观测最大高度 %.1fm", maxAltitude, maxObserved),
+                "affectedWaypoints", overLimitIds
+            ));
+            dangerCount++;
+        } else if (!nearLimitIds.isEmpty()) {
+            risks.add(Map.of(
+                "category", "altitude",
+                "level", "warning",
+                "title", "接近高度上限",
+                "description", String.format("%d 个航点已接近最大飞行高度", nearLimitIds.size()),
+                "detail", String.format("最大高度限制 %.0fm，部分航点已达 85%% 以上", maxAltitude),
+                "affectedWaypoints", nearLimitIds
+            ));
+            warningCount++;
+        }
+
+        // 4. Terrain risk
+        List<Map<String, Object>> terrain = getTerrain();
+        List<String> terrainCriticalIds = new ArrayList<>();
+        List<String> terrainWarningIds = new ArrayList<>();
+
+        for (Waypoint wp : waypoints) {
+            double nearestElev = 0;
+            double minDist = Double.MAX_VALUE;
+            for (Map<String, Object> tp : terrain) {
+                double lat = ((Number) tp.get("lat")).doubleValue();
+                double lng = ((Number) tp.get("lng")).doubleValue();
+                double elev = ((Number) tp.get("elevation")).doubleValue();
+                double d = haversine(wp.getLat(), wp.getLng(), lat, lng);
+                if (d < minDist) {
+                    minDist = d;
+                    nearestElev = elev;
+                }
+            }
+            double clearance = wp.getAltitude() - nearestElev;
+            if (clearance < safeDistance) {
+                if (clearance <= 0) {
+                    terrainCriticalIds.add(wp.getId());
+                } else {
+                    terrainWarningIds.add(wp.getId());
+                }
+            }
+        }
+
+        if (!terrainCriticalIds.isEmpty()) {
+            List<String> combined = new ArrayList<>(terrainCriticalIds);
+            combined.addAll(terrainWarningIds);
+            risks.add(Map.of(
+                "category", "terrain",
+                "level", "danger",
+                "title", "严重：存在撞山风险",
+                "description", String.format("%d 个航点高度低于或等于地形海拔", terrainCriticalIds.size()),
+                "detail", String.format("安全距离要求 %.0fm，建议提升飞行高度或重新规划航线", safeDistance),
+                "affectedWaypoints", combined
+            ));
+            dangerCount++;
+        } else if (!terrainWarningIds.isEmpty()) {
+            risks.add(Map.of(
+                "category", "terrain",
+                "level", "warning",
+                "title", "地形安全距离不足",
+                "description", String.format("%d 个航点与地形安全距离不足", terrainWarningIds.size()),
+                "detail", String.format("安全距离要求 %.0fm，建议适当提升高度", safeDistance),
+                "affectedWaypoints", terrainWarningIds
+            ));
+            warningCount++;
+        }
+
+        String overallLevel = "safe";
+        if (dangerCount > 0) overallLevel = "danger";
+        else if (warningCount > 0) overallLevel = "warning";
+
+        return Map.of(
+            "overallLevel", overallLevel,
+            "totalRiskCount", risks.size(),
+            "dangerCount", dangerCount,
+            "warningCount", warningCount,
+            "risks", risks,
+            "canExport", waypoints.size() >= 2
+        );
+    }
 }
